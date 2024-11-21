@@ -70,7 +70,7 @@ Recent breakthroughs in deep reinforcement learning (DRL) have shown promise in 
 
 ### 2.6 Google Colab Integration
 
-For users without access to a GPU, we provide a Google Colab notebook (`GTDQN_Training.ipynb`) that enables training on free cloud GPUs. Key features include:
+For users without access to a GPU, there is a Google Colab notebook (`GTDQN_Training.ipynb`) that enables training on free cloud GPUs. Key features include:
 
 1. **GPU Acceleration**: Automatic access to NVIDIA T4 or P100 GPUs
 2. **Checkpoint Management**: 
