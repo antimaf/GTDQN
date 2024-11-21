@@ -68,6 +68,39 @@ Recent breakthroughs in deep reinforcement learning (DRL) have shown promise in 
 - **Storage**: At least 1GB for model checkpoints and training data
 - **GPU**: NVIDIA GPU with CUDA support (optional but recommended)
 
+### 2.6 Google Colab Integration
+
+For users without access to a GPU, we provide a Google Colab notebook (`GTDQN_Training.ipynb`) that enables training on free cloud GPUs. Key features include:
+
+1. **GPU Acceleration**: Automatic access to NVIDIA T4 or P100 GPUs
+2. **Checkpoint Management**: 
+   - Automatic saving to Google Drive
+   - Resume capability from latest checkpoint
+   - Regular progress tracking
+3. **Real-time Monitoring**:
+   - Training metrics visualization
+   - Episode rewards tracking
+   - Win rates and Nash distance plots
+4. **Resource Management**:
+   - Optimized batch sizes for Colab GPUs
+   - Automatic session management
+   - Memory-efficient data handling
+
+To use Colab training:
+1. Open [Google Colab](https://colab.research.google.com)
+2. Go to File → Open Notebook → GitHub
+3. Enter repository: `antimaf/GTDQN`
+4. Select `GTDQN_Training.ipynb`
+5. Enable GPU: Runtime → Change runtime type → GPU
+6. Run all cells in order
+
+The notebook will automatically handle:
+- Repository cloning
+- Dependency installation
+- GPU configuration
+- Training checkpoints
+- Progress visualization
+
 ---
 
 ## 3. Theoretical Framework
