@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from collections import deque, namedtuple
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 
 # Define experience tuple structure
 Experience = namedtuple('Experience', 
@@ -24,10 +24,10 @@ class ReplayBuffer:
         
     def push(
         self,
-        state: np.ndarray,
+        state: Dict[str, np.ndarray],
         action: int,
         reward: float,
-        next_state: np.ndarray,
+        next_state: Dict[str, np.ndarray],
         done: bool,
         hidden_state: Tuple[torch.Tensor, torch.Tensor] = None
     ):
@@ -35,15 +35,18 @@ class ReplayBuffer:
         Store experience in replay buffer.
         
         Args:
-            state: Current state
+            state: Current state (dictionary of tensors)
             action: Action taken
             reward: Reward received
-            next_state: Next state
+            next_state: Next state (dictionary of tensors)
             done: Whether episode ended
             hidden_state: LSTM hidden state
         """
-        state = torch.FloatTensor(state).to(self.device)
-        next_state = torch.FloatTensor(next_state).to(self.device)
+        # Convert state dictionaries to device tensors if they aren't already
+        if not isinstance(state[next(iter(state))], torch.Tensor):
+            state = {k: torch.FloatTensor(v).to(self.device) for k, v in state.items()}
+        if not isinstance(next_state[next(iter(next_state))], torch.Tensor):
+            next_state = {k: torch.FloatTensor(v).to(self.device) for k, v in next_state.items()}
         
         self.buffer.append(Experience(state, action, reward, next_state, done, hidden_state))
         
@@ -59,11 +62,22 @@ class ReplayBuffer:
         """
         experiences = np.random.choice(self.buffer, batch_size, replace=False)
         
-        # Unzip experiences into separate arrays
-        states = torch.stack([e.state for e in experiences])
+        # Get first state to determine keys
+        first_state = experiences[0].state
+        state_keys = first_state.keys()
+        
+        # Batch states by key
+        states = {
+            k: torch.stack([e.state[k] for e in experiences]) 
+            for k in state_keys
+        }
+        next_states = {
+            k: torch.stack([e.next_state[k] for e in experiences])
+            for k in state_keys
+        }
+        
         actions = torch.tensor([e.action for e in experiences], dtype=torch.long).to(self.device)
         rewards = torch.tensor([e.reward for e in experiences], dtype=torch.float).to(self.device)
-        next_states = torch.stack([e.next_state for e in experiences])
         dones = torch.tensor([e.done for e in experiences], dtype=torch.float).to(self.device)
         
         # Handle hidden states
