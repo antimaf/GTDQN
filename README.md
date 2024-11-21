@@ -167,51 +167,248 @@ class CardEncoder(nn.Module):
 
 ### 4.2 Sequential Processing
 Betting history is processed using LSTM with attention:
+
 ```python
 class HistoryProcessor(nn.Module):
-    def __init__(self, hidden_size=128):
+    def __init__(self, hidden_size=128, num_layers=2):
         super().__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        # LSTM for processing betting history
         self.lstm = nn.LSTM(
             input_size=hidden_size,
             hidden_size=hidden_size,
-            num_layers=2,
-            dropout=0.1,
-            batch_first=True
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=0.1
         )
-        self.attention = MultiheadAttention(hidden_size, num_heads=4)
         
+        # Multi-head attention mechanism
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=4,
+            dropout=0.1
+        )
+        
+        # Layer normalisation
+        self.layer_norm1 = nn.LayerNorm(hidden_size)
+        self.layer_norm2 = nn.LayerNorm(hidden_size)
+        
+        # Position-wise feed-forward network
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size * 4, hidden_size)
+        )
+    
     def forward(self, x, mask=None):
-        lstm_out, _ = self.lstm(x)
-        attn_out, _ = self.attention(lstm_out, lstm_out, lstm_out, key_padding_mask=mask)
-        return attn_out
-```
+        """
+        Process betting history with LSTM and attention
+        
+        Args:
+            x (torch.Tensor): Betting history [batch_size, seq_len, hidden_size]
+            mask (torch.Tensor): Attention mask for padding
+            
+        Returns:
+            torch.Tensor: Processed history representation
+        """
+        # LSTM processing
+        lstm_out, (h_n, c_n) = self.lstm(x)
+        
+        # Self-attention mechanism
+        # Reshape for attention [seq_len, batch_size, hidden_size]
+        lstm_out = lstm_out.transpose(0, 1)
+        attended, _ = self.attention(
+            lstm_out, lstm_out, lstm_out,
+            key_padding_mask=mask,
+            need_weights=False
+        )
+        
+        # Residual connection and layer norm
+        attended = self.layer_norm1(lstm_out + attended)
+        
+        # Position-wise FFN
+        ffn_out = self.ffn(attended)
+        
+        # Final residual connection and layer norm
+        output = self.layer_norm2(attended + ffn_out)
+        
+        # Reshape back to [batch_size, seq_len, hidden_size]
+        output = output.transpose(0, 1)
+        
+        return output
+
+class ActionEncoder(nn.Module):
+    def __init__(self, num_actions, hidden_size=128):
+        super().__init__()
+        self.action_embedding = nn.Embedding(num_actions, hidden_size)
+        self.position_encoding = PositionalEncoding(hidden_size, max_len=50)
+        
+    def forward(self, actions):
+        """
+        Encode action sequence with positional information
+        
+        Args:
+            actions (torch.Tensor): Action indices [batch_size, seq_len]
+            
+        Returns:
+            torch.Tensor: Encoded actions with positional information
+        """
+        # Embed actions
+        embedded = self.action_embedding(actions)
+        
+        # Add positional encoding
+        encoded = self.position_encoding(embedded)
+        
+        return encoded
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, hidden_size, max_len=50):
+        super().__init__()
+        
+        # Create positional encoding matrix
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, hidden_size, 2) * (-math.log(10000.0) / hidden_size))
+        
+        pe = torch.zeros(max_len, 1, hidden_size)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        
+        self.register_buffer('pe', pe)
+        
+    def forward(self, x):
+        """
+        Add positional encoding to input tensor
+        
+        Args:
+            x (torch.Tensor): Input tensor [batch_size, seq_len, hidden_size]
+            
+        Returns:
+            torch.Tensor: Input with positional encoding added
+        """
+        return x + self.pe[:x.size(0)]
 
 ### 4.3 Value Networks
-Implementing the dueling architecture:
+Implementation of the dueling architecture for value estimation:
+
 ```python
 class DuelingNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim):
+    def __init__(self, state_dim, action_dim, hidden_sizes=[512, 256]):
         super().__init__()
-        self.advantage = nn.Sequential(
-            nn.Linear(state_dim, 512),
+        
+        # Common feature network
+        self.feature_net = nn.Sequential(
+            nn.Linear(state_dim, hidden_sizes[0]),
             nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, action_dim)
-        )
-        self.value = nn.Sequential(
-            nn.Linear(state_dim, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
+            nn.BatchNorm1d(hidden_sizes[0]),
+            nn.Dropout(0.1)
         )
         
-    def forward(self, state):
-        advantage = self.advantage(state)
-        value = self.value(state)
-        return value + advantage - advantage.mean(dim=-1, keepdim=True)
-```
+        # Value stream
+        self.value_net = nn.Sequential(
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_sizes[1]),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_sizes[1], 1)
+        )
+        
+        # Advantage stream
+        self.advantage_net = nn.Sequential(
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_sizes[1]),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_sizes[1], action_dim)
+        )
+        
+        # Game-theoretic layer
+        self.gt_layer = GTLayer(hidden_sizes[1], action_dim)
+        
+        # Initialise weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        """
+        Initialise network weights using He initialisation
+        """
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+    
+    def forward(self, state, return_features=False):
+        """
+        Forward pass through the dueling network
+        
+        Args:
+            state (torch.Tensor): Input state [batch_size, state_dim]
+            return_features (bool): Whether to return intermediate features
+            
+        Returns:
+            torch.Tensor: Q-values for each action
+            torch.Tensor: Feature representations (if return_features=True)
+        """
+        # Extract features
+        features = self.feature_net(state)
+        
+        # Compute value and advantage
+        value = self.value_net(features)
+        advantage = self.advantage_net(features)
+        
+        # Apply game-theoretic constraints
+        gt_advantage = self.gt_layer(advantage)
+        
+        # Combine value and advantage (dueling architecture)
+        q_values = value + gt_advantage - gt_advantage.mean(dim=1, keepdim=True)
+        
+        if return_features:
+            return q_values, features
+        return q_values
+
+class GTLayer(nn.Module):
+    def __init__(self, hidden_size, action_dim):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.action_dim = action_dim
+        
+        # Strategic reasoning module
+        self.strategic_net = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, action_dim),
+            nn.Tanh()
+        )
+        
+        # Counterfactual value estimator
+        self.counterfactual_net = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, action_dim)
+        )
+    
+    def forward(self, advantage):
+        """
+        Apply game-theoretic constraints to advantage values
+        
+        Args:
+            advantage (torch.Tensor): Raw advantage values [batch_size, action_dim]
+            
+        Returns:
+            torch.Tensor: Constrained advantage values
+        """
+        # Strategic adjustment
+        strategic_factor = self.strategic_net(advantage)
+        
+        # Counterfactual correction
+        counterfactual_values = self.counterfactual_net(advantage)
+        
+        # Combine components
+        adjusted_advantage = advantage * (1 + strategic_factor) + counterfactual_values
+        
+        return adjusted_advantage
 
 ## 5. Training Framework
 
@@ -271,6 +468,40 @@ where:
 - $P(i)$: Priority probability of transition $i$
 - $\beta$: Importance sampling exponent (annealed from initial value to 1)
 
+Implementation:
+```python
+class GTDQNLoss(nn.Module):
+    def __init__(self, gamma=0.99):
+        super().__init__()
+        self.gamma = gamma
+        
+    def forward(self, current_q, target_q, rewards, done, importance_weights):
+        """
+        Calculate the weighted TD loss for GT-DQN
+        
+        Args:
+            current_q (torch.Tensor): Q-values from current network
+            target_q (torch.Tensor): Q-values from target network
+            rewards (torch.Tensor): Immediate rewards
+            done (torch.Tensor): Binary tensor indicating terminal states
+            importance_weights (torch.Tensor): Weights for prioritised replay
+            
+        Returns:
+            torch.Tensor: Weighted TD loss
+        """
+        # Calculate TD target
+        next_q = target_q.max(dim=1)[0].detach()
+        td_target = rewards + self.gamma * next_q * (1 - done)
+        
+        # Calculate TD error
+        td_error = td_target - current_q
+        
+        # Apply importance weights
+        weighted_loss = importance_weights * td_error.pow(2)
+        
+        return weighted_loss.mean(), td_error.abs().detach()
+```
+
 ### 5.3 Evaluation Metrics
 The agent's performance is evaluated using several key metrics:
 
@@ -279,25 +510,217 @@ The agent's performance is evaluated using several key metrics:
    \epsilon = \frac{1}{2}\sum_{i=1}^2 \max_{\sigma'_i} (u_i(\sigma'_i, \sigma_{-i}) - u_i(\sigma))
    $$
 
+   where:
+   - $\sigma'_i$: Best response strategy for player $i$
+   - $\sigma_{-i}$: Fixed strategy of opponent
+   - $u_i$: Utility function for player $i$
+
+   Implementation:
+   ```python
+   def calculate_exploitability(agent, env):
+       """
+       Calculate the exploitability of an agent's strategy
+       
+       Args:
+           agent: The GT-DQN agent
+           env: Poker environment instance
+           
+       Returns:
+           float: Average exploitability score
+       """
+       exploitability = 0
+       for player in range(2):
+           # Create best response agent
+           br_agent = create_best_response(env, agent, player)
+           
+           # Simulate games
+           total_utility = 0
+           n_games = 1000
+           
+           for _ in range(n_games):
+               state = env.reset()
+               done = False
+               while not done:
+                   if env.current_player == player:
+                       action = br_agent.act(state)
+                   else:
+                       action = agent.act(state)
+                   state, reward, done, _ = env.step(action)
+               total_utility += reward if player == 0 else -reward
+           
+           exploitability += max(0, total_utility / n_games)
+       
+       return exploitability / 2
+   ```
+
 2. **Expected Game Value**: Computed over N episodes:
    $$
    V = \frac{1}{N}\sum_{i=1}^N \sum_{t=0}^T \gamma^t r_t^i
    $$
+
+   where:
+   - $N$: Number of episodes
+   - $T$: Episode length
+   - $\gamma$: Discount factor
+   - $r_t^i$: Reward at time t in episode i
+
+   Implementation:
+   ```python
+   def calculate_expected_value(agent, env, n_episodes=1000):
+       """
+       Calculate expected value over multiple episodes
+       
+       Args:
+           agent: The GT-DQN agent
+           env: Poker environment instance
+           n_episodes: Number of episodes to evaluate
+           
+       Returns:
+           float: Average episode return
+       """
+       total_return = 0
+       
+       for episode in range(n_episodes):
+           state = env.reset()
+           episode_return = 0
+           done = False
+           step = 0
+           
+           while not done:
+               action = agent.act(state)
+               next_state, reward, done, _ = env.step(action)
+               episode_return += reward * (agent.gamma ** step)
+               state = next_state
+               step += 1
+           
+           total_return += episode_return
+       
+       return total_return / n_episodes
+   ```
 
 3. **Win Rate**: Against baseline agents (MCTS and CFR):
    $$
    WR_{agent} = \frac{\text{Games Won}}{\text{Total Games}} \times 100\%
    $$
 
+   Implementation:
+   ```python
+   def calculate_win_rate(agent, opponent, env, n_games=1000):
+       """
+       Calculate win rate against a specific opponent
+       
+       Args:
+           agent: The GT-DQN agent
+           opponent: Opponent agent (e.g., MCTS or CFR agent)
+           env: Poker environment instance
+           n_games: Number of games to play
+           
+       Returns:
+           float: Win rate percentage
+       """
+       wins = 0
+       
+       for game in range(n_games):
+           state = env.reset()
+           done = False
+           
+           while not done:
+               if env.current_player == 0:
+                   action = agent.act(state)
+               else:
+                   action = opponent.act(state)
+               state, reward, done, _ = env.step(action)
+           
+           if reward > 0:  # Agent won
+               wins += 1
+       
+       return (wins / n_games) * 100
+   ```
+
 4. **Average Stack Efficiency**: Measures effective stack utilisation:
    $$
    SE = \frac{1}{N}\sum_{i=1}^N \frac{\text{Final Stack}_i}{\text{Initial Stack}_i}
    $$
 
+   where:
+   - $N$: Number of episodes
+   - $\text{Final Stack}_i$: Remaining chips after episode i
+   - $\text{Initial Stack}_i$: Starting chips in episode i
+
+   Implementation:
+   ```python
+   def calculate_stack_efficiency(agent, env, n_episodes=1000):
+       """
+       Calculate how efficiently the agent uses its stack
+       
+       Args:
+           agent: The GT-DQN agent
+           env: Poker environment instance
+           n_episodes: Number of episodes to evaluate
+           
+       Returns:
+           float: Average stack efficiency
+       """
+       total_efficiency = 0
+       
+       for _ in range(n_episodes):
+           state = env.reset()
+           initial_stack = env.player_stacks[0]
+           done = False
+           
+           while not done:
+               action = agent.act(state)
+               state, _, done, _ = env.step(action)
+           
+           final_stack = env.player_stacks[0]
+           episode_efficiency = final_stack / initial_stack
+           total_efficiency += episode_efficiency
+       
+       return total_efficiency / n_episodes
+   ```
+
 5. **Bluff Frequency**: Ratio of successful bluffs to total bluff attempts:
    $$
    BF = \frac{\text{Successful Bluffs}}{\text{Total Bluff Attempts}}
    $$
+
+   Implementation:
+   ```python
+   def calculate_bluff_frequency(agent, env, n_hands=1000):
+       """
+       Calculate the ratio of successful bluffs to total bluff attempts
+       
+       Args:
+           agent: The GT-DQN agent
+           env: Poker environment instance
+           n_hands: Number of hands to evaluate
+           
+       Returns:
+           float: Bluff success rate
+       """
+       total_bluffs = 0
+       successful_bluffs = 0
+       
+       for _ in range(n_hands):
+           state = env.reset()
+           done = False
+           bluffed_this_hand = False
+           
+           while not done:
+               if env.current_player == 0:  # Agent's turn
+                   action = agent.act(state)
+                   # Check if action is a bluff
+                   if is_bluff(env, action):
+                       total_bluffs += 1
+                       bluffed_this_hand = True
+               
+               state, reward, done, _ = env.step(action)
+               
+               if done and bluffed_this_hand and reward > 0:
+                   successful_bluffs += 1
+       
+       return successful_bluffs / total_bluffs if total_bluffs > 0 else 0
+   ```
 
 ### 5.4 Policy Extraction
 Following [Heinrich & Silver, 2016], we use a softmax policy with temperature:
@@ -305,6 +728,13 @@ Following [Heinrich & Silver, 2016], we use a softmax policy with temperature:
 $$
 \pi_\beta(a|s) = \frac{\exp(Q(s,a)/\tau)}{\sum_{a'} \exp(Q(s,a')/\tau)}
 $$
+
+where:
+- $\tau$: Temperature parameter controlling exploration
+- $Q(s,a)$: Action-value function
+- $\pi_\beta$: Softmax policy
+
+---
 
 ## 6. Implementation Details
 

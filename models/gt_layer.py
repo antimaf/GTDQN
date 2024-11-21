@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 from dataclasses import dataclass
 
 @dataclass
@@ -12,6 +12,138 @@ class StrategyProfile:
     regrets: torch.Tensor      # Cumulative regrets for actions
     avg_strategy: torch.Tensor  # Average strategy over time
     visit_count: int           # Number of times this profile was visited
+
+class GTLayer(nn.Module):
+    """
+    Game Theoretic Layer for GT-DQN
+    Implements strategic reasoning and counterfactual value estimation
+    """
+    def __init__(self, hidden_size: int, action_dim: int):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.action_dim = action_dim
+        
+        # Strategic reasoning module
+        self.strategic_net = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, action_dim),
+            nn.Tanh()
+        )
+        
+        # Counterfactual value estimator
+        self.counterfactual_net = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, action_dim)
+        )
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        """Initialize network weights using He initialization"""
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+    
+    def forward(self, advantage: torch.Tensor) -> torch.Tensor:
+        """
+        Apply game-theoretic constraints to advantage values
+        
+        Args:
+            advantage (torch.Tensor): Raw advantage values [batch_size, action_dim]
+            
+        Returns:
+            torch.Tensor: Constrained advantage values
+        """
+        # Strategic adjustment
+        strategic_factor = self.strategic_net(advantage)
+        
+        # Counterfactual correction
+        counterfactual_values = self.counterfactual_net(advantage)
+        
+        # Combine components
+        adjusted_advantage = advantage * (1 + strategic_factor) + counterfactual_values
+        
+        return adjusted_advantage
+
+class DuelingNetwork(nn.Module):
+    """
+    Dueling network architecture with game-theoretic constraints
+    Separates state value and action advantage estimation
+    """
+    def __init__(self, state_dim: int, action_dim: int, hidden_sizes: List[int] = [512, 256]):
+        super().__init__()
+        
+        # Common feature network
+        self.feature_net = nn.Sequential(
+            nn.Linear(state_dim, hidden_sizes[0]),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_sizes[0]),
+            nn.Dropout(0.1)
+        )
+        
+        # Value stream
+        self.value_net = nn.Sequential(
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_sizes[1]),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_sizes[1], 1)
+        )
+        
+        # Advantage stream
+        self.advantage_net = nn.Sequential(
+            nn.Linear(hidden_sizes[0], hidden_sizes[1]),
+            nn.ReLU(),
+            nn.BatchNorm1d(hidden_sizes[1]),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_sizes[1], action_dim)
+        )
+        
+        # Game-theoretic layer
+        self.gt_layer = GTLayer(hidden_sizes[1], action_dim)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        """Initialize network weights using He initialization"""
+        if isinstance(module, nn.Linear):
+            nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+    
+    def forward(self, state: torch.Tensor, return_features: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Forward pass through the dueling network
+        
+        Args:
+            state (torch.Tensor): Input state [batch_size, state_dim]
+            return_features (bool): Whether to return intermediate features
+            
+        Returns:
+            torch.Tensor: Q-values for each action
+            torch.Tensor: Feature representations (if return_features=True)
+        """
+        # Extract features
+        features = self.feature_net(state)
+        
+        # Compute value and advantage
+        value = self.value_net(features)
+        advantage = self.advantage_net(features)
+        
+        # Apply game-theoretic constraints
+        gt_advantage = self.gt_layer(advantage)
+        
+        # Combine value and advantage (dueling architecture)
+        q_values = value + gt_advantage - gt_advantage.mean(dim=1, keepdim=True)
+        
+        if return_features:
+            return q_values, features
+        return q_values
 
 class GameTheoreticLayer(nn.Module):
     """
